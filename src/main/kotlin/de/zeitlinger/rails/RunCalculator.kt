@@ -1,111 +1,53 @@
 package de.zeitlinger.rails
 
-import java.util.*
-
-class RunCalculator {
-
-    fun calculateBestRun(run: Run): Run? {
-        var best: Run? = null
-
-        for (trainRun in run.getTrainRuns()) {
-            val stations = trainRun.stations
-            if (stations.isEmpty()) {
-                for (station in run.homeStations) {
-                    val next = Run(run)
-                    next.getTrainRun(trainRun.train).stations.add(station)
-                    best = getBestRun(best, next)
-                }
-                //the rest is placed in the next iteration
-                return best
-            }
-
-            if (!trainRun.isComplete) {
-                for (listPosition in ListPosition.values()) {
-                    best = addStation(run, best, trainRun, listPosition)
-                }
-
-                if (!trainRun.isComplete) {
-                    //the rest is placed in the next iteration
-                    return best
-                }
-            }
-        }
-
+fun calculateBestRun(run: Run, tried: MutableSet<Run>, board: Board): Run {
+    if (!tried.add(run)) {
         return run
     }
 
-    private fun addStation(run: Run, best: Run?, trainRun: TrainRun, listPosition: ListPosition): Run? {
-        var best = best
-        var complete = true
+    val runs: List<Run> = run.trainRuns.flatMap { trainRun ->
+        val train = trainRun.train
 
-        val station = listPosition[trainRun.stations]
-        for (connection in station.getConnections()) {
-            val destination = connection.getDestination(station)
-            if (canAddStation(run, trainRun, connection, destination)) {
-                complete = false
+        val stations = trainRun.stations
+        if (stations.isEmpty()) {
+            run.homeStations.map { homeStation ->
+                run.withStation(train, homeStation, ListPosition.TAIL, listOf())
+            }
+        } else {
+            ListPosition.values().flatMap { listPosition ->
+                val start = listPosition[stations]
+                board.connections[start].orEmpty().flatMap { connection ->
+                    val destination = connection.getDestination(start)
 
-                val next = Run(run)
-                listPosition.add(next.getTrainRun(trainRun.train).stations, destination)
-                next.addUsedConnection(connection)
-                best = getBestRun(best, next)
+                    destination
+                            .takeIf { canAddStation(connection, destination, stations, run.usedTracks, train.cities) }
+                            ?.let { run.withStation(train, destination, listPosition, connection.tracks) }
+                            .let { listOfNotNull(it) }
+                }
             }
         }
-
-        trainRun.isComplete = complete
-
-        return best
     }
-
-    private fun canAddStation(run: Run, trainRun: TrainRun, connection: Connection, destination: Station): Boolean {
-        return (run.getUsedTracks().none { connection.tracks.contains(it) }
-                && !trainRun.stations.contains(destination)
-                && trainRun.stations.size < trainRun.train.cities)
-    }
-
-    private fun getBestRun(oldBest: Run?, next: Run): Run? {
-        val newBest = calculateBestRun(next)
-
-        val oldValue = oldBest?.value ?: 0
-        val newValue = newBest?.value ?: 0
-
-        return if (oldValue >= newValue) oldBest else newBest
-    }
-
-    companion object {
-
-        @JvmStatic
-        fun main(args: Array<String>) {
-            val lines = RunCalculator::class.java.classLoader.getResource("gameState.txt").readText(Charsets.UTF_8).lines().toMutableList()
-
-            val stations = LinkedHashMap<String, Station>()
-            for (list in lines.removeAt(0).split(',').chunked(2)) {
-                val name = list[0]
-                stations[name] = Station(name, Integer.parseInt(list.get(1)))
-            }
-
-            val homeStations = ArrayList<Station>()
-            for (name in lines.removeAt(0).split(',')) {
-                homeStations.add(stations[name]!!)
-            }
-
-            val trainRuns = ArrayList<TrainRun>()
-            for (value in lines.removeAt(0).split(',')) {
-                trainRuns.add(TrainRun(Train(Integer.parseInt(value)), listOf()))
-            }
-
-            for (line in lines) {
-                val strings = line.split(',')
-                val start = stations[strings[0]]!!
-                val end = stations[strings[2]]!!
-                val connection = Connection(
-                        Track(start, strings[1]),
-                        Track(end, strings[3]))
-
-                start.addConnection(connection)
-                end.addConnection(connection)
-            }
-
-            println(RunCalculator().calculateBestRun(Run(homeStations, trainRuns, setOf()))!!.value)
-        }
-    }
+    return (runs.map { calculateBestRun(it, tried, board) } + listOf(run)).maxBy { it.value }!!
 }
+
+private fun Run.withStation(train: Train, station: Station, listPosition: ListPosition = ListPosition.TAIL, usedTracks: List<Track> = listOf()): Run {
+    val trainRun = getTrainRun(trainRuns, train)
+    val stations = trainRun.stations.run { toMutableList() }
+            .apply { listPosition.add(this, station) }
+            .apply {
+                if (first().name > last().name) {
+                    reverse() //avoid symmetry
+                }
+            }
+
+    return copy(trainRuns = trainRuns.replace(trainRun, trainRun.copy(stations = stations)), usedTracks = this.usedTracks + usedTracks)
+}
+
+fun <T> Iterable<T>.replace(old: T, new: T): List<T> =
+        map { if (it == old) new else it }
+
+private fun canAddStation(connection: Connection, destination: Station, trainStations: List<Station>, usedTracks: Set<Track>, cities: Int): Boolean =
+        (usedTracks.none { connection.tracks.contains(it) }
+                && !trainStations.contains(destination)
+                && trainStations.size < cities)
+
